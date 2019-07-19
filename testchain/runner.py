@@ -14,17 +14,18 @@ from testchain.generator import Generator
 from testchain.address import COINBASE_KEY
 from testchain.util import DisjointSet
 
-LOG_LEVEL = logging.INFO
 bitcointx.SelectParams('regtest')
 
 
 class Runner(object):
     motif_generators: List[Generator]
 
-    def __init__(self, output_dir, chain, executable):
+    def __init__(self, output_dir, chain, executable, log_level, node_dir=None, current_time=1535760000):
         self.chain = chain
         self.exec = executable
-        self.current_time = 1535760000
+        self.node_dir = node_dir
+        self.log_level = log_level
+        self.current_time = current_time
         self.prev_block = None
         self.motif_generators = []
         self.kv = {}
@@ -38,12 +39,15 @@ class Runner(object):
 
     def _setup_logger(self):
         self.log = logging.getLogger(__name__)
-        self.log.setLevel(LOG_LEVEL)
-        ch = logging.StreamHandler()
-        ch.setLevel(LOG_LEVEL)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        ch.setFormatter(formatter)
-        self.log.addHandler(ch)
+        self.log.setLevel(self.log_level)
+        # todo: log setup can be improved, eg. inject config from the calling file (generate_*.py)
+        if not self.log.hasHandlers():
+            ch = logging.StreamHandler()
+            ch.setLevel(self.log_level)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            ch.setFormatter(formatter)
+            self.log.addHandler(ch)
+        self.log.info("Setting log level to " + logging.getLevelName(self.log_level))
 
     def _setup_chain_params(self):
         # set up chainspecific
@@ -52,8 +56,13 @@ class Runner(object):
             bitcointx.SelectAlternativeParams(CoreLitecoinParams, RegtestLitecoinParams)
 
     def _setup_bitcoind(self):
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.log.info("datadir: {}".format(self.tempdir.name))
+        if self.node_dir:
+            if not os.path.isdir(self.node_dir):
+                raise NotADirectoryError("The node_dir directory does not exist.")
+        else:
+            self.node_dir = tempfile.TemporaryDirectory().name
+
+        self.log.info("Using node directory {}".format(self.node_dir))
 
         if self.chain == "btc" or self.chain == "bch":
             filename = "bitcoin.conf"
@@ -63,18 +72,20 @@ class Runner(object):
             raise ValueError("Unkown chain. Please add an entry for the config file name.")
 
         # copy conf file to temp dir
-        self.conf_file = self.tempdir.name + "/" + filename
+        self.conf_file = self.node_dir + "/" + filename
         self.log.info("Config file created at {}".format(self.conf_file))
         shutil.copy("bitcoin.conf", self.conf_file)
 
         # launch bitcoind
-        params = [self.exec, "-rpcport=18443", "-datadir={}".format(self.tempdir.name),
-                  "-mocktime={}".format(self.current_time)]
+        params = [self.exec, "-rpcport=18443", "-datadir={}".format(self.node_dir),
+                  "-mocktime={}".format(self.current_time), "-reindex"]
 
         # Disable Bitcoin Cash specific address format (breaks Python library)
         # Enable CTOR
         if self.chain == "bch":
             params += ["-usecashaddr=0", "-magneticanomalyactivationtime=0"]
+
+        self.log.info("Executing {}".format(params))
         self.proc = subprocess.Popen(params, stdout=subprocess.DEVNULL)
 
         # kill process when generator is done
@@ -87,9 +98,12 @@ class Runner(object):
         """
         Kills the bitcoind process
         """
-        self.proc.terminate()
-        self.log.info("Waiting 5 seconds for node to quit")
-        sleep(5)
+        if self.proc.poll() is None:
+            sleep(1)
+            self.log.info("Waiting 30 seconds for node to quit")
+            self.proc.terminate()
+            self.proc.wait(30)
+            self.log.info("Node has terminated")
 
     def next_timestamp(self):
         self.current_time += 600
@@ -110,9 +124,9 @@ class Runner(object):
         total_addresses = 0
         unique_addresses = set()
         for g in self.motif_generators:
-            key_indizes = [x.key_index for x in g.addresses]
-            unique_addresses |= set(key_indizes)
-            total_addresses += len(key_indizes)
+            key_indices = [x.key_index for x in g.addresses]
+            unique_addresses |= set(key_indices)
+            total_addresses += len(key_indices)
         if len(unique_addresses) != total_addresses:
             self.log.warning("Addresses are not unique.")
 
@@ -126,7 +140,7 @@ class Runner(object):
         self.log.info("Copying blk00000.dat to {}".format(blk_destination))
         if not os.path.exists(blk_destination):
             os.makedirs(blk_destination)
-        source = "{}/regtest/blocks/blk00000.dat".format(self.tempdir.name)
+        source = "{}/regtest/blocks/blk00000.dat".format(self.node_dir)
 
         if truncate_file:
             with open(source, "rb") as f:
@@ -179,9 +193,20 @@ class Runner(object):
         self.motif_generators.append(gen)
 
     def run(self):
+        startBlockHeight = self.proxy.call("getblockcount")
+        self.log.info("### Starting with a chain of " + str(startBlockHeight) + " blocks")
+
         for g in self.motif_generators:
+            self.log.info("Starting generator " + type(g).__name__ + " (Block height: " + str(self.proxy.call("getblockcount")) + ")")
             g.run()
+
         self._address_sanity_check()
         self.copy_blk_file()
         self.persist_hashes()
         self.persist_cospends()
+
+        endBlockHeight = self.proxy.call("getblockcount")
+        self.log.info("### Finishing with a chain of " + str(endBlockHeight) + " blocks, generated " + str(endBlockHeight - startBlockHeight) + " blocks")
+
+        self._terminate()
+

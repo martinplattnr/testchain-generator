@@ -65,6 +65,7 @@ class Generator(object):
             self.log.debug("Mined block: {}".format([x for x in block_hashes][0]))
         else:
             self.log.debug("Mined blocks: {}".format([x for x in block_hashes]))
+        self.log.debug("Current block height: " + str(self.proxy.call("getblockcount")))
         return block_hashes
 
     def next_address(self, address_type="p2pkh") -> Address:

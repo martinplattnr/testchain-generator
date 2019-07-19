@@ -1,4 +1,5 @@
 import argparse
+import logging
 
 from testchain.motifs.general import SetupChain, FinalizeChain
 from testchain.motifs.change import Change
@@ -14,8 +15,11 @@ parser = argparse.ArgumentParser(description='Generate a synthetic blockchain.')
 parser.add_argument('--output-dir', dest='output_dir', default="../files/", help='Output directory')
 parser.add_argument('--chain', dest='chain', default="btc", help='Chain [btc, bch]')
 parser.add_argument('--exec', dest='exec', default="bitcoind", help="Path to bitcoind executable")
+parser.add_argument('-d', '--debug', help="Print debugging statements",
+                    action="store_const", dest="log_level", const=logging.DEBUG, default=logging.INFO)
+
 args = parser.parse_args()
-generator = Runner(args.output_dir, args.chain, args.exec)
+generator = Runner(args.output_dir, args.chain, args.exec, args.log_level)
 
 generator.add_generator(SetupChain)
 generator.add_generator(Addresses)
